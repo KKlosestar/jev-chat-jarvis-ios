@@ -404,7 +404,7 @@ final class KeyboardViewController: UIInputViewController {
         // 待机页**不放**发送键：这一页还没有候选，没有可发的东西；而输入框一旦有字，
         // 宿主 App 自己的发送按钮就出来了，
         // 键盘下方再挂一个只是添乱。发送键只在结果页——点完候选、手还在面板上时用。
-        let vstack = UIStackView(arrangedSubview: [guide, btnRow, tonesBtn, ctxBtn, settingsBtn])
+        let vstack = UIStackView(arrangedSubviews: [guide, btnRow, tonesBtn, ctxBtn, settingsBtn])
         vstack.axis = .vertical
         vstack.spacing = 8
         if JevDraft(cfg: cfg).isConfigured {
