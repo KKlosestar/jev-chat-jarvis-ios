@@ -1,17 +1,23 @@
 name: Build IPA (for AltStore)
 
-# 用法：fork 本仓库后，把本文件放到 .github/workflows/ 下，
-# 然后在 Actions 页手动运行（Run workflow）。构建产物在运行结果页可下载。
-
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: macos-13
+    runs-on: macos-14
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
+
+      - name: Select newest Xcode (project needs Xcode 16 / objectVersion 77)
+        run: |
+          echo "=== Installed Xcodes ==="
+          ls -d /Applications/Xcode*.app 2>/dev/null | sort -V
+          LATEST_XCODE=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
+          echo "Selecting: $LATEST_XCODE"
+          sudo xcode-select -s "$LATEST_XCODE/Contents/Developer"
+          xcodebuild -version
 
       - name: Generate Xcode project
         run: |
@@ -26,7 +32,7 @@ jobs:
             -destination 'generic/platform=iOS' \
             -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
-            build 2>&1 | tail -n 100
+            build 2>&1 | tail -n 120
 
       - name: Embed entitlements (ldid, so App Group works after AltStore re-signs)
         run: |
