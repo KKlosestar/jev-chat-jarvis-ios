@@ -87,6 +87,26 @@ enum KB {
         return b
     }
 
+    /// 单行输入框：键盘设置页填 API Key / 地址 / 模型。
+    static func textField(placeholder: String, value: String = "",
+                          secure: Bool = false, keyboard: UIKeyboardType = .default) -> UITextField {
+        let tf = UITextField()
+        tf.placeholder = placeholder
+        tf.text = value
+        tf.borderStyle = .roundedRect
+        tf.backgroundColor = UIColor { t in
+            t.userInterfaceStyle == .dark
+                ? UIColor(white: 1, alpha: 0.08) : UIColor(white: 0, alpha: 0.04)
+        }
+        tf.font = .systemFont(ofSize: 13)
+        tf.autocapitalizationType = .none
+        tf.autocorrectionType = .no
+        tf.isSecureTextEntry = secure
+        tf.keyboardType = keyboard
+        tf.heightAnchor.constraint(equalToConstant: 36).isActive = true
+        return tf
+    }
+
     /// 小圆角徽章：意图、话术、风险。
     /// 横向必须按内容 hug——放进横向 stack 时，默认的 .fill 会把多余宽度分给
     /// hugging 最低的那个 label，徽章就会被拉成整行宽、把正文挤没。

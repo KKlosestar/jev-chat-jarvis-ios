@@ -17,7 +17,7 @@ final class KeyboardViewController: UIInputViewController {
         jevLocalized(language, zh: zh, en: en)
     }
 
-    private enum Mode { case gate, idle, tones, contexts, loading, result, error }
+    private enum Mode { case gate, idle, tones, contexts, settings, loading, result, error }
 
     private var mode: Mode = .idle
     private var lastSource: Source = .clipboard
@@ -312,6 +312,7 @@ final class KeyboardViewController: UIInputViewController {
         case .idle: contentStack.addArrangedSubview(idleView())
         case .tones: contentStack.addArrangedSubview(tonesView())
         case .contexts: contentStack.addArrangedSubview(contextsView())
+        case .settings: contentStack.addArrangedSubview(settingsView())
         case .loading: contentStack.addArrangedSubview(loadingView())
         case .result: contentStack.addArrangedSubview(resultView())
         case .error: contentStack.addArrangedSubview(errorView())
@@ -395,16 +396,21 @@ final class KeyboardViewController: UIInputViewController {
         ctxBtn.heightAnchor.constraint(equalToConstant: 34).isActive = true
         ctxBtn.addTarget(self, action: #selector(openContextPicker), for: .touchUpInside)
 
+        // 键盘内设置：App Group 共享不可用时，直接在键盘里填 API Key，无需主 App。
+        let settingsBtn = KB.button(L("⚙️ 键盘设置（直接填 API Key）", "Keyboard Settings"), icon: "gearshape")
+        settingsBtn.heightAnchor.constraint(equalToConstant: 34).isActive = true
+        settingsBtn.addTarget(self, action: #selector(openSettings), for: .touchUpInside)
+
         // 待机页**不放**发送键：这一页还没有候选，没有可发的东西；而输入框一旦有字，
         // 宿主 App 自己的发送按钮就出来了，
         // 键盘下方再挂一个只是添乱。发送键只在结果页——点完候选、手还在面板上时用。
-        let vstack = UIStackView(arrangedSubviews: [guide, btnRow, tonesBtn, ctxBtn])
+        let vstack = UIStackView(arrangedSubview: [guide, btnRow, tonesBtn, ctxBtn, settingsBtn])
         vstack.axis = .vertical
         vstack.spacing = 8
         if JevDraft(cfg: cfg).isConfigured {
             // 配置完整时不占行
         } else {
-            let warn = KB.label(L("⚠️ 还没配置生成层：打开 Jev Jarvis App →「模型」页填 API Key", "⚠️ Generation is not configured: open Jev Jarvis → Models and add an API key"),
+            let warn = KB.label(L("⚠️ 还没配置生成层：点下面「键盘设置」直接填 API Key，或在主 App「模型」页配置", "⚠️ Generation is not configured: tap Keyboard Settings below"),
                                 font: .systemFont(ofSize: 12), color: .systemOrange, lines: 0)
             vstack.addArrangedSubview(warn)
         }
@@ -512,6 +518,99 @@ final class KeyboardViewController: UIInputViewController {
         guard let id = sender.accessibilityIdentifier else { return }
         JevStore.activeContextProfileID = id == "none" ? nil : UUID(uuidString: id)
         render()
+    }
+
+    // MARK: 键盘设置（App Group 不可用时直接在键盘里配）
+
+    @objc private func openSettings() { setMode(.settings) }
+
+    private func settingsView() -> UIView {
+        let cfg = JevStore.loadConfig()
+        var blocks: [UIView] = []
+
+        blocks.append(KB.label(L("生成层配置（DeepSeek 官方）", "Generation config"),
+                               font: .systemFont(ofSize: 13, weight: .semibold), lines: 0))
+
+        let keyField = KB.textField(placeholder: L("粘贴 API Key（sk-…）", "API Key (sk-…)"),
+                                    value: cfg.genKey)
+        blocks.append(KB.label(L("API Key", "API Key"), font: .systemFont(ofSize: 11),
+                               color: KB.secondaryText))
+        blocks.append(keyField)
+
+        let baseField = KB.textField(placeholder: "https://api.deepseek.com",
+                                     value: cfg.genBase.isEmpty ? "https://api.deepseek.com" : cfg.genBase)
+        blocks.append(KB.label(L("接口地址", "Base URL"), font: .systemFont(ofSize: 11),
+                               color: KB.secondaryText))
+        blocks.append(baseField)
+
+        let modelField = KB.textField(placeholder: "deepseek-chat",
+                                      value: cfg.genModel.isEmpty ? "deepseek-chat" : cfg.genModel)
+        blocks.append(KB.label(L("模型名", "Model"), font: .systemFont(ofSize: 11),
+                               color: KB.secondaryText))
+        blocks.append(modelField)
+
+        let status = KB.label("", font: .systemFont(ofSize: 11), color: .systemGreen, lines: 0)
+        blocks.append(status)
+
+        let save = KB.button(L("保存", "Save"), icon: "checkmark", primary: true)
+        save.heightAnchor.constraint(equalToConstant: 38).isActive = true
+        save.addTarget(self, action: #selector(saveKeyboardSettings), for: .touchUpInside)
+        blocks.append(save)
+
+        let back = KB.button(L("返回", "Back"), icon: "chevron.left")
+        back.heightAnchor.constraint(equalToConstant: 36).isActive = true
+        back.addTarget(self, action: #selector(backToIdle), for: .touchUpInside)
+        blocks.append(back)
+
+        blocks.append(KB.label(L("配置只存在键盘本地；Key 请在 DeepSeek 平台申请并设充值上限。",
+                                 "Stored locally on the keyboard."),
+                               font: .systemFont(ofSize: 10), color: KB.secondaryText, lines: 0))
+
+        objc_setAssociatedObject(save, &Self.kbKeyFieldKey, keyField, .OBJC_ASSOCIATION_RETAIN)
+        objc_setAssociatedObject(save, &Self.kbBaseFieldKey, baseField, .OBJC_ASSOCIATION_RETAIN)
+        objc_setAssociatedObject(save, &Self.kbModelFieldKey, modelField, .OBJC_ASSOCIATION_RETAIN)
+        objc_setAssociatedObject(save, &Self.kbStatusKey, status, .OBJC_ASSOCIATION_RETAIN)
+
+        let outer = UIStackView(arrangedSubviews: blocks)
+        outer.axis = .vertical
+        outer.spacing = 5
+        fitBlocks = blocks
+        return outer
+    }
+
+    private static var kbKeyFieldKey: UInt8 = 0
+    private static var kbBaseFieldKey: UInt8 = 0
+    private static var kbModelFieldKey: UInt8 = 0
+    private static var kbStatusKey: UInt8 = 0
+
+    @objc private func saveKeyboardSettings(_ sender: UIButton) {
+        guard let keyField = objc_getAssociatedObject(sender, &Self.kbKeyFieldKey) as? UITextField,
+              let baseField = objc_getAssociatedObject(sender, &Self.kbBaseFieldKey) as? UITextField,
+              let modelField = objc_getAssociatedObject(sender, &Self.kbModelFieldKey) as? UITextField,
+              let status = objc_getAssociatedObject(sender, &Self.kbStatusKey) as? UILabel else { return }
+
+        let key = (keyField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let base = (baseField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let model = (modelField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !key.isEmpty && !base.isEmpty && !model.isEmpty else {
+            status.textColor = .systemRed
+            status.text = L("请填全 Key / 地址 / 模型", "Please fill all fields")
+            return
+        }
+
+        var cfg = JevStore.loadConfig()
+        cfg.genKind = .openai
+        cfg.genKey = key
+        cfg.genBase = base
+        cfg.genModel = model
+        JevStore.saveKeyboardLocalConfig(cfg)
+
+        status.textColor = .systemGreen
+        status.text = L("已保存 ✓", "Saved ✓")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
+            self.setMode(.idle)
+        }
     }
 
     private func gridRow(_ cells: [UIView]) -> UIStackView {

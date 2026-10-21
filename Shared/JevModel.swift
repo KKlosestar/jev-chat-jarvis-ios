@@ -148,24 +148,48 @@ enum JevStore {
         return base.appendingPathComponent("jev-config.json")
     }
 
+    /// 键盘扩展私有存储：当 App Group 共享容器因签名/权限原因不可用时，
+    /// 键盘可在自己的设置页直接保存配置，不依赖主 App 同步。
+    private static let localConfigKey = "jev.config.kb-local.v1"
+    private static func generationConfigured(_ cfg: JevConfig?) -> Bool {
+        guard let cfg else { return false }
+        return !cfg.genKey.isEmpty && !cfg.genBase.isEmpty && !cfg.genModel.isEmpty
+    }
+
     static func loadConfig() -> JevConfig {
-        var stored: JevConfig?
+        // 1) 优先用 App Group 里的配置（主 App 同步过来的）
+        var groupCfg: JevConfig?
         if let data = try? Data(contentsOf: groupConfigURL) {
-            stored = try? JSONDecoder().decode(JevConfig.self, from: data)
+            groupCfg = try? JSONDecoder().decode(JevConfig.self, from: data)
         }
-        if stored == nil, let data = defaults.data(forKey: configKey) {
-            stored = try? JSONDecoder().decode(JevConfig.self, from: data)
+        if groupCfg == nil, let data = defaults.data(forKey: configKey) {
+            groupCfg = try? JSONDecoder().decode(JevConfig.self, from: data)
         }
-        guard var cfg = stored else { return JevConfig() }
-        if cfg.genBase == removedGenerationBase {
-            let preset = ProviderPreset.all.first { $0.id == "zhipu" }
-            cfg.genKind = preset?.kind ?? .openai
-            cfg.genBase = preset?.base ?? ""
-            cfg.genKey = ""
-            cfg.genModel = preset?.model ?? ""
-            cfg.genExtraJSON = ""
-            saveConfig(cfg)
+        if generationConfigured(groupCfg), var cfg = groupCfg {
+            return normalize(cfg)
         }
+        // 2) Group 不可用/为空 → 用键盘本地保存的配置
+        if let data = UserDefaults.standard.data(forKey: localConfigKey),
+           let localCfg = try? JSONDecoder().decode(JevConfig.self, from: data),
+           generationConfigured(localCfg) {
+            return localCfg
+        }
+        // 3) 都没有 → 返回 group 配置（可能为空模板）
+        if let cfg = groupCfg { return normalize(cfg) }
+        return JevConfig()
+    }
+
+    /// 迁移旧的自建服务地址，兼容历史配置。
+    private static func normalize(_ cfg: JevConfig) -> JevConfig {
+        guard cfg.genBase == removedGenerationBase else { return cfg }
+        var cfg = cfg
+        let preset = ProviderPreset.all.first { $0.id == "zhipu" }
+        cfg.genKind = preset?.kind ?? .openai
+        cfg.genBase = preset?.base ?? ""
+        cfg.genKey = ""
+        cfg.genModel = preset?.model ?? ""
+        cfg.genExtraJSON = ""
+        saveConfig(cfg)
         return cfg
     }
 
@@ -173,6 +197,12 @@ enum JevStore {
         guard let data = try? JSONEncoder().encode(cfg) else { return }
         defaults.set(data, forKey: configKey)
         try? data.write(to: groupConfigURL, options: .atomic)
+    }
+
+    /// 键盘设置页调用：只存到扩展私有 UserDefaults（无需 App Group）。
+    static func saveKeyboardLocalConfig(_ cfg: JevConfig) {
+        guard let data = try? JSONEncoder().encode(cfg) else { return }
+        UserDefaults.standard.set(data, forKey: localConfigKey)
     }
 
     static func loadKeyboardStatus() -> KeyboardStatus? {
