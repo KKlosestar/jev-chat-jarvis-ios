@@ -1,0 +1,58 @@
+name: Build IPA (for AltStore)
+
+# 用法：fork 本仓库后，把本文件放到 .github/workflows/ 下，
+# 然后在 Actions 页手动运行（Run workflow）。构建产物在运行结果页可下载。
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Generate Xcode project
+        run: |
+          brew install xcodegen
+          xcodegen generate
+
+      - name: Build (unsigned, Release)
+        run: |
+          set -o pipefail
+          xcodebuild -project JevJarvis.xcodeproj -scheme JevJarvis \
+            -configuration Release -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tail -n 100
+
+      - name: Embed entitlements (ldid, so App Group works after AltStore re-signs)
+        run: |
+          brew install ldid
+          APP=$(find build -type d -name "JevJarvis.app" | head -1)
+          test -n "$APP"
+          echo "APP=$APP"
+          ldid -S"App/JevJarvis.entitlements" "$APP/JevJarvis"
+          ldid -S"Keyboard/JevKeyboard.entitlements" "$APP/PlugIns/JevKeyboard.appex/JevKeyboard"
+          echo "--- App entitlements ---"
+          ldid -e "$APP/JevJarvis"
+          echo "--- Keyboard entitlements ---"
+          ldid -e "$APP/PlugIns/JevKeyboard.appex/JevKeyboard"
+
+      - name: Package IPA
+        run: |
+          APP=$(find build -type d -name "JevJarvis.app" | head -1)
+          rm -rf Payload
+          mkdir Payload
+          cp -R "$APP" Payload/
+          zip -qry JevJarvis.ipa Payload
+          ls -lh JevJarvis.ipa
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: JevJarvis-ipa
+          path: JevJarvis.ipa
+          retention-days: 14
