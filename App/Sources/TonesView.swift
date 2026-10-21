@@ -12,6 +12,7 @@ struct TonesView: View {
                 customSection
                 previewSection
             }
+            .scrollDismissesKeyboard(.immediately)
             .navigationTitle(jevLocalized(store.language, zh: "话术", en: "Tones"))
             .sheet(isPresented: $showAdd) { AddToneView() }
         }
@@ -106,6 +107,7 @@ private struct AddToneView: View {
                 TextField(jevLocalized(store.language, zh: "说明（什么语气 + 别变成什么）", en: "Description (tone + what to avoid)"), text: $desc, axis: .vertical)
                     .lineLimit(3...6)
             }
+            .scrollDismissesKeyboard(.immediately)
             .navigationTitle(jevLocalized(store.language, zh: "自定义话术", en: "Custom tone"))
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button(jevLocalized(store.language, zh: "取消", en: "Cancel")) { dismiss() } }

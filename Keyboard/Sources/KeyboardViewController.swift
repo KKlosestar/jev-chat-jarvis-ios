@@ -17,7 +17,7 @@ final class KeyboardViewController: UIInputViewController {
         jevLocalized(language, zh: zh, en: en)
     }
 
-    private enum Mode { case gate, idle, tones, loading, result, error }
+    private enum Mode { case gate, idle, tones, contexts, loading, result, error }
 
     private var mode: Mode = .idle
     private var lastSource: Source = .clipboard
@@ -311,6 +311,7 @@ final class KeyboardViewController: UIInputViewController {
         case .gate: contentStack.addArrangedSubview(gateView())
         case .idle: contentStack.addArrangedSubview(idleView())
         case .tones: contentStack.addArrangedSubview(tonesView())
+        case .contexts: contentStack.addArrangedSubview(contextsView())
         case .loading: contentStack.addArrangedSubview(loadingView())
         case .result: contentStack.addArrangedSubview(resultView())
         case .error: contentStack.addArrangedSubview(errorView())
@@ -381,10 +382,23 @@ final class KeyboardViewController: UIInputViewController {
         tonesBtn.heightAnchor.constraint(equalToConstant: 34).isActive = true
         tonesBtn.addTarget(self, action: #selector(openTonePicker), for: .touchUpInside)
 
+        // 上下文档案：点进去选当前聊天对象（也支持按备注名自动匹配）
+        JevStore.migrateLegacyContextSummaryIfNeeded()
+        let profiles = JevStore.contextProfiles
+        let activeName: String
+        if let id = JevStore.activeContextProfileID, let p = profiles.first(where: { $0.id == id }) {
+            activeName = p.name
+        } else {
+            activeName = L("未携带", "None")
+        }
+        let ctxBtn = KB.button(L("上下文：", "Context: ") + activeName, icon: "text.bubble")
+        ctxBtn.heightAnchor.constraint(equalToConstant: 34).isActive = true
+        ctxBtn.addTarget(self, action: #selector(openContextPicker), for: .touchUpInside)
+
         // 待机页**不放**发送键：这一页还没有候选，没有可发的东西；而输入框一旦有字，
         // 宿主 App 自己的发送按钮就出来了，
         // 键盘下方再挂一个只是添乱。发送键只在结果页——点完候选、手还在面板上时用。
-        let vstack = UIStackView(arrangedSubviews: [guide, btnRow, tonesBtn])
+        let vstack = UIStackView(arrangedSubviews: [guide, btnRow, tonesBtn, ctxBtn])
         vstack.axis = .vertical
         vstack.spacing = 8
         if JevDraft(cfg: cfg).isConfigured {
@@ -444,6 +458,60 @@ final class KeyboardViewController: UIInputViewController {
         outer.spacing = 6
         fitBlocks = blocks
         return outer
+    }
+
+    // MARK: 上下文档案选择视图（直接在键盘上切）
+
+    @objc private func openContextPicker() { setMode(.contexts) }
+
+    private func contextsView() -> UIView {
+        JevStore.migrateLegacyContextSummaryIfNeeded()
+        let profiles = JevStore.contextProfiles
+        let activeID = JevStore.activeContextProfileID
+
+        let title = KB.label(L("选上下文档案（分析时作为背景）", "Choose a context profile"),
+                             font: .systemFont(ofSize: 12), color: KB.secondaryText, lines: 0)
+        var blocks: [UIView] = [title]
+
+        if profiles.isEmpty {
+            blocks.append(KB.label(L("还没有档案：打开 App →「上下文」页粘贴聊天记录生成", "No profiles yet. Create one in the app → Context"),
+                                   font: .systemFont(ofSize: 12), color: KB.secondaryText, lines: 0))
+        } else {
+            for p in profiles {
+                let btn = KB.button(p.name, primary: p.id == activeID,
+                                    font: .systemFont(ofSize: 13, weight: .medium))
+                btn.heightAnchor.constraint(equalToConstant: 34).isActive = true
+                btn.accessibilityIdentifier = p.id.uuidString
+                btn.addTarget(self, action: #selector(contextChipTapped(_:)), for: .touchUpInside)
+                blocks.append(btn)
+            }
+        }
+        let noneBtn = KB.button(L("不携带（盲分析）", "None (blind)"), primary: activeID == nil,
+                                font: .systemFont(ofSize: 13, weight: .medium))
+        noneBtn.heightAnchor.constraint(equalToConstant: 34).isActive = true
+        noneBtn.accessibilityIdentifier = "none"
+        noneBtn.addTarget(self, action: #selector(contextChipTapped(_:)), for: .touchUpInside)
+        blocks.append(noneBtn)
+
+        blocks.append(KB.label(L("提示：档案备注名写成对方的微信昵称/备注，粘贴记录时自动匹配", "Tip: name a profile after the contact's nickname to auto-match on paste"),
+                               font: .systemFont(ofSize: 11), color: KB.secondaryText, lines: 0))
+
+        let done = KB.button(L("好了", "Done"), icon: "checkmark", primary: true)
+        done.heightAnchor.constraint(equalToConstant: 36).isActive = true
+        done.addTarget(self, action: #selector(backToIdle), for: .touchUpInside)
+        blocks.append(done)
+
+        let outer = UIStackView(arrangedSubviews: blocks)
+        outer.axis = .vertical
+        outer.spacing = 6
+        fitBlocks = blocks
+        return outer
+    }
+
+    @objc private func contextChipTapped(_ sender: UIButton) {
+        guard let id = sender.accessibilityIdentifier else { return }
+        JevStore.activeContextProfileID = id == "none" ? nil : UUID(uuidString: id)
+        render()
     }
 
     private func gridRow(_ cells: [UIView]) -> UIStackView {
@@ -692,6 +760,11 @@ final class KeyboardViewController: UIInputViewController {
             setMode(.error)
             return
         }
+        // 自动匹配：仅当备注名明确命中（转发块行首昵称 / 单条消息正文提到）才切换
+        if let suggestion = JevStore.suggestContextProfile(in: text),
+           JevStore.activeContextProfileID != suggestion.id {
+            JevStore.activeContextProfileID = suggestion.id
+        }
         run(message: text)
     }
 
@@ -716,10 +789,13 @@ final class KeyboardViewController: UIInputViewController {
         setMode(.loading)
         stageLabel.text = L("判断中…", "Judging…")
         let pipeline = JevPipeline(cfg: JevStore.loadConfig())
+        // 键盘端选中的档案是唯一事实源：分析一律用它（自动切换只在「分析剪贴板」
+        // 明确命中时发生，见 analyzeClipboard）
+        let context = JevStore.activeContextSummary
 
         Task { @MainActor [weak self] in
             let analysis = await pipeline.analyze(
-                message: message, context: nil,
+                message: message, context: context,
                 onStage: { [weak self] stage in
                     Task { @MainActor in
                         switch stage {

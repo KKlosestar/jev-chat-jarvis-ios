@@ -57,7 +57,7 @@ struct JudgePreset: Identifiable, Hashable {
               base: "https://api.typesafe.ai", model: "jev-latest",
               keyHint: "api.typesafe.ai 的 key"),
         .init(id: "openrouter", name: "OpenRouter 网关",
-              base: "https://openrouter.ai/api/alpha/decisions", model: "typesafe/jev-1.13",
+              base: "https://openrouter.ai/api/alpha/decisions", model: "deepseek/deepseek-v4-flash",
               keyHint: "OpenRouter 的 sk-or-…"),
         .init(id: "vercel", name: "Vercel AI Gateway",
               base: "https://ai-gateway.vercel.sh/v1/evaluate", model: "typesafe-ai/jev",
@@ -140,11 +140,23 @@ enum JevStore {
         return defaults.string(forKey: canaryKey) == stamp
     }
 
+    /// 组容器里的配置文件：UserDefaults 套件在部分环境下（签名权限时序、cfprefsd 延迟落盘）
+    /// 杀掉 App 重开后读不回来。文件是原子写、即时落盘，与套件互为备份，读取优先文件。
+    private static var groupConfigURL: URL {
+        let base = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupID)
+            ?? FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
+        return base.appendingPathComponent("jev-config.json")
+    }
+
     static func loadConfig() -> JevConfig {
-        guard let data = defaults.data(forKey: configKey),
-              var cfg = try? JSONDecoder().decode(JevConfig.self, from: data) else {
-            return JevConfig()
+        var stored: JevConfig?
+        if let data = try? Data(contentsOf: groupConfigURL) {
+            stored = try? JSONDecoder().decode(JevConfig.self, from: data)
         }
+        if stored == nil, let data = defaults.data(forKey: configKey) {
+            stored = try? JSONDecoder().decode(JevConfig.self, from: data)
+        }
+        guard var cfg = stored else { return JevConfig() }
         if cfg.genBase == removedGenerationBase {
             let preset = ProviderPreset.all.first { $0.id == "zhipu" }
             cfg.genKind = preset?.kind ?? .openai
@@ -158,9 +170,9 @@ enum JevStore {
     }
 
     static func saveConfig(_ cfg: JevConfig) {
-        if let data = try? JSONEncoder().encode(cfg) {
-            defaults.set(data, forKey: configKey)
-        }
+        guard let data = try? JSONEncoder().encode(cfg) else { return }
+        defaults.set(data, forKey: configKey)
+        try? data.write(to: groupConfigURL, options: .atomic)
     }
 
     static func loadKeyboardStatus() -> KeyboardStatus? {
@@ -173,6 +185,86 @@ enum JevStore {
         if let data = try? JSONEncoder().encode(s) {
             defaults.set(data, forKey: statusKey)
         }
+    }
+
+    // MARK: 上下文档案（多档案 + 备注名 + 键盘切换/按对象自动匹配）
+
+    private static let profilesFileURL: URL = {
+        let base = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupID)
+            ?? FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
+        return base.appendingPathComponent("jev-contexts.json")
+    }()
+    private static let profilesKey = "jev.context.profiles.v1"
+    private static let activeProfileKey = "jev.context.active.v1"
+
+    struct ContextProfile: Codable, Equatable, Identifiable {
+        var id = UUID()
+        var name: String
+        var summary: String
+        var updatedAt = Date()
+    }
+
+    /// 档案列表：文件原子写为主、UserDefaults 备份（与配置同策略）。
+    static var contextProfiles: [ContextProfile] {
+        if let data = try? Data(contentsOf: profilesFileURL),
+           let list = try? JSONDecoder().decode([ContextProfile].self, from: data) {
+            return list
+        }
+        if let data = defaults.data(forKey: profilesKey) {
+            return (try? JSONDecoder().decode([ContextProfile].self, from: data)) ?? []
+        }
+        return []
+    }
+
+    static func saveContextProfiles(_ list: [ContextProfile]) {
+        guard let data = try? JSONEncoder().encode(list) else { return }
+        defaults.set(data, forKey: profilesKey)
+        try? data.write(to: profilesFileURL, options: .atomic)
+    }
+
+    /// 键盘当前使用的档案；nil = 「不携带」（盲分析）。
+    static var activeContextProfileID: UUID? {
+        get {
+            guard let s = defaults.string(forKey: activeProfileKey), !s.isEmpty else { return nil }
+            return UUID(uuidString: s)
+        }
+        set { defaults.set(newValue?.uuidString ?? "", forKey: activeProfileKey) }
+    }
+
+    /// 当前生效的摘要：选中档案的 summary；未选中或档案已删 = nil。
+    static var activeContextSummary: String? {
+        guard let id = activeContextProfileID,
+              let p = contextProfiles.first(where: { $0.id == id }) else { return nil }
+        let s = p.summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        return s.isEmpty ? nil : s
+    }
+
+    /// 迁移：v8 的单摘要 → 名为「默认」的档案。**严格一次性**（打标记 + 删旧键）：
+    /// 旧键若残留，任何一次空读都会重新触发迁移、把档案文件覆盖成只剩"默认"——这就是
+    /// 早期版本档案混乱被覆盖的根因。
+    static func migrateLegacyContextSummaryIfNeeded() {
+        guard defaults.string(forKey: "jev.context.migrated.v1") == nil else { return }
+        defer { defaults.set("1", forKey: "jev.context.migrated.v1") }
+        if !contextProfiles.isEmpty { return }
+        if let legacy = defaults.string(forKey: "jev.context.summary.v1"),
+           !legacy.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let p = ContextProfile(name: "默认", summary: legacy, updatedAt: Date())
+            saveContextProfiles([p])
+            if activeContextProfileID == nil { activeContextProfileID = p.id }
+        }
+        defaults.removeObject(forKey: "jev.context.summary.v1")
+    }
+
+    /// 自动匹配建议：只在明确命中时返回。转发块（≥2 行）要求名字出现在行首（行首就是
+    /// 发送者昵称）；单条消息无发送者信息，仅在名字出现在正文里才算命中。
+    /// 返回 nil = 无建议，键盘保持当前选择不动。
+    static func suggestContextProfile(in text: String) -> ContextProfile? {
+        let lines = text.split(whereSeparator: \.isNewline)
+        for p in contextProfiles where !p.name.isEmpty {
+            if lines.count >= 2, lines.contains(where: { $0.hasPrefix(p.name) }) { return p }
+            if lines.count < 2, text.contains(p.name) { return p }
+        }
+        return nil
     }
 
     /// 密钥展示用掩码

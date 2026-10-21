@@ -35,6 +35,7 @@ struct PlaygroundView: View {
                     AnalysisResultView(analysis: a)
                 }
             }
+            .scrollDismissesKeyboard(.immediately)
             .navigationTitle(jevLocalized(store.language, zh: "试一试", en: "Try it"))
         }
     }

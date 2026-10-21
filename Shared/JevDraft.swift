@@ -1,5 +1,21 @@
 import Foundation
 
+// MARK: - 上下文摘要（方案 B：App「上下文」页生成，键盘分析自动携带）
+
+extension JevStore {
+    /// 关系摘要：App 端由生成层把聊天记录压缩成 ≤200 字存进来；键盘每次分析把它当
+    /// context 传给判断层与起草层（两者的 prompt 模板本来就支持 context 槽）。
+    /// 上限 1200 字，留空等于不带上下文。
+    static var contextSummary: String {
+        get { defaults.string(forKey: "jev.context.summary.v1") ?? "" }
+        set {
+            let t = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if t.isEmpty { defaults.removeObject(forKey: "jev.context.summary.v1") }
+            else { defaults.set(String(t.prefix(1200)), forKey: "jev.context.summary.v1") }
+        }
+    }
+}
+
 // MARK: - 生成层：OpenAI / Anthropic 兼容起草客户端
 //
 // 一个话术一次请求（两话术合在一个 prompt 里会互相渗味，macOS 版实测结论）。

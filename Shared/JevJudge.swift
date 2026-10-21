@@ -65,6 +65,20 @@ final class JevJudge {
         self.model = cfg.judgeModel.trimmingCharacters(in: .whitespaces)
     }
 
+    /// OpenRouter 的 /api/alpha/decisions 决策端点与 jev-1.13 模型已下架（CN 区账号还会 403）。
+    /// 对 openrouter.ai 一律改走普通 chat completions + typesafe/jev-router，
+    /// 用 JSON 输出模拟 SystemOne 的 answers 形状，上层解析逻辑不变。
+    private var useChatMode: Bool { base.lowercased().contains("openrouter.ai") }
+
+    /// 旧配置里的退役模型名统一映射到快速非思考模型：jev-router 会随机路由到思考型
+    /// 模型（一次判断动辄十几秒还常超时转盲起草）；意图/风险分类用 flash 级足够，
+    /// 实测约 650 tokens、单次成本忽略不计。
+    private var chatModel: String {
+        let m = model.lowercased()
+        if m.contains("jev") { return "deepseek/deepseek-v4-flash" }
+        return model
+    }
+
     var isConfigured: Bool { !key.isEmpty && !base.isEmpty && !model.isEmpty }
 
     // MARK: URL 拼接（与 macOS 版 #42 单一规则一致）
@@ -161,7 +175,8 @@ final class JevJudge {
     // MARK: transport
 
     private func post(_ payload: [String: Any], stage: String) async throws -> [String: Any] {
-        try await JevHTTP.postJSON(
+        if useChatMode { return try await postViaChat(payload, stage: stage) }
+        return try await JevHTTP.postJSON(
             payload,
             url: Self.requestURL(base),
             headers: [
@@ -171,6 +186,89 @@ final class JevJudge {
             budget: stage == "判断" ? 15 : 12,
             stage: stage
         )
+    }
+
+    // MARK: chat 模式（OpenRouter）
+
+    /// 把 SystemOne 形状的题目翻译成一条 chat 请求，要求模型输出 JSON，
+    /// 再拼回 answers 字典（choice/score + probabilities），与决策端点同形状。
+    private func postViaChat(_ payload: [String: Any], stage: String) async throws -> [String: Any] {
+        guard let questions = payload["questions"] as? [String: Any] else {
+            throw JevError.config("判断题目缺失")
+        }
+        let state = payload["state"] as? String ?? ""
+
+        var qLines: [String] = []
+        var schemaParts: [String] = []
+        for (name, raw) in questions {
+            guard let q = raw as? [String: Any] else { continue }
+            let instr = q["instructions"] as? String ?? ""
+            qLines.append("问题「\(name)」：\(instr)")
+            if let criteria = q["criteria"] as? [String: Any] {
+                qLines.append("  选项（choice 只能从中选一个，用原文）：\(criteria.keys.joined(separator: "、"))")
+                schemaParts.append("\"\(name)\": {\"choice\": \"选项原文\", \"confidence\": 0到1的小数, \"probabilities\": {每个选项原文: 概率}}")
+            } else if let levels = q["criteria"] as? [String] {
+                qLines.append("  等级（从低到高）：\(levels.enumerated().map { "\($0.offset)=\($0.element)" }.joined(separator: "；"))")
+                schemaParts.append("\"\(name)\": {\"score\": 等级编号, \"probabilities\": {每个等级原文: 概率}}")
+            }
+        }
+        let system = "你是沟通意图与风险判断器。只输出一个 JSON 对象，不输出解释、markdown 或其他文字。probabilities 里所有概率之和约等于 1。"
+        let user = "待分析消息：\n\(state)\n\n\(qLines.joined(separator: "\n"))\n\n输出 JSON，每个问题一个键，值形如：\(schemaParts.joined(separator: "；"))"
+
+        // 路由模型多为思考型：max_tokens 要够思考+正文，正文空时从 reasoning 里兜底抠 JSON。
+        let chat: [String: Any] = [
+            "model": chatModel,
+            "messages": [
+                ["role": "system", "content": system],
+                ["role": "user", "content": user],
+            ],
+            "temperature": 0.2,
+            "max_tokens": 600,
+        ]
+        let data = try await JevHTTP.postJSON(
+            chat,
+            url: "https://openrouter.ai/api/v1/chat/completions",
+            headers: [
+                "Content-Type": "application/json",
+                "Authorization": "Bearer \(key)",
+            ],
+            budget: stage == "判断" ? 30 : 25,
+            stage: stage
+        )
+        guard let choices = data["choices"] as? [[String: Any]],
+              let msg = choices.first?["message"] as? [String: Any] else {
+            throw JevError.badJSON(stage)
+        }
+        let content = (msg["content"] as? String) ?? (msg["reasoning"] as? String) ?? ""
+        let obj = Self.extractJSON(content)
+        guard !obj.isEmpty else { throw JevError.thinkingOnly(stage) }
+
+        var answers: [String: Any] = [:]
+        for (name, raw) in questions {
+            guard let q = raw as? [String: Any], let ans = obj[name] as? [String: Any] else { continue }
+            if q["type"] as? String == "score" {
+                answers[name] = ["score": ans["score"] ?? 0, "probabilities": ans["probabilities"] ?? [:]]
+            } else {
+                answers[name] = [
+                    "choice": ans["choice"] ?? "",
+                    "confidence": ans["confidence"] ?? 0,
+                    "probabilities": ans["probabilities"] ?? [:],
+                ]
+            }
+        }
+        return ["answers": answers]
+    }
+
+    /// 剥掉 markdown 代码围栏，抠出第一个完整 JSON 对象。
+    private static func extractJSON(_ s: String) -> [String: Any] {
+        var t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        if t.hasPrefix("```") {
+            t = t.trimmingCharacters(in: CharacterSet(charactersIn: "` \n\t"))
+            if t.lowercased().hasPrefix("json") { t = String(t.dropFirst(4)) }
+        }
+        guard let start = t.firstIndex(of: "{"), let end = t.lastIndex(of: "}"), start < end else { return [:] }
+        let sub = String(t[start...end])
+        return (try? JSONSerialization.jsonObject(with: Data(sub.utf8))) as? [String: Any] ?? [:]
     }
 
     private func doubleValue(_ v: Any?) -> Double {

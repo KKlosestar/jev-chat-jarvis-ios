@@ -11,6 +11,7 @@ struct ProvidersView: View {
                 judgeSection
                 generationSection
             }
+            .scrollDismissesKeyboard(.immediately)
             .navigationTitle(jevLocalized(store.language, zh: "模型", en: "Models"))
         }
     }
